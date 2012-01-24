@@ -80,18 +80,26 @@ type Deserialization a =
   . ContextualDeserialization context a
 
 
-type ContextualSerialization context a =
-  forall backend
-  .  MonadSerialWriter BackendSpecificSerialization
-                       backend
-  => BackendSpecificSerialization backend context a
+newtype ContextualSerialization context a =
+  ContextualSerialization {
+      contextualSerializationAction
+        :: forall backend
+        .  (BackendSpecificMonadSerial BackendSpecificSerialization backend,
+            MonadSerial (BackendSpecificSerialization backend),
+            MonadSerialWriter BackendSpecificSerialization backend)
+        => BackendSpecificSerialization backend context a
+    }
 
 
-type ContextualDeserialization context a =
-  forall backend
-  .  MonadSerialReader BackendSpecificDeserialization
-                       backend
-  => BackendSpecificDeserialization backend context a
+newtype ContextualDeserialization context a =
+  ContextualDeserialization {
+      contextualDeserializationAction
+        :: forall backend
+        .  (BackendSpecificMonadSerial BackendSpecificDeserialization backend,
+            MonadSerial (BackendSpecificDeserialization backend),
+            MonadSerialReader BackendSpecificDeserialization backend)
+        => BackendSpecificDeserialization backend context a
+    }
 
 
 data SerialOrigin
@@ -185,25 +193,8 @@ class (Show failure, Typeable failure) => SerializationFailure failure where
 
 class (Serial backend,
        Monad (PrimitiveMonad backend))
-      => MonadSerial m backend
-      where
-  monadSerialConstructor
-    :: (Internals m backend
-        -> context
-        -> [(Int, String)]
-        -> PrimitiveMonad backend
-             (Either (Int, [(Int, String)], SomeSerializationFailure)
-                     (Internals m backend, a)))
-    -> m backend context a
-  monadSerialActionAccessor
-    :: m backend context a
-    -> (Internals m backend
-        -> context
-        -> [(Int, String)]
-        -> PrimitiveMonad backend
-             (Either (Int, [(Int, String)], SomeSerializationFailure)
-                     (Internals m backend, a)))
-  
+      => BackendSpecificMonadSerial m backend
+      where  
   data Internals m backend
   getInternals
     :: m backend context (Internals m backend)
@@ -213,18 +204,34 @@ class (Serial backend,
   internalsDataSource
     :: Internals m backend
     -> SerialDataSource backend
-  
+
+
+-- IAK
+class MonadSerial m where
+  throw
+    :: forall context failure a
+    .  (Monad (m context),
+        SerializationFailure failure)
+    => failure
+    -> m context a
+  catch
+    :: forall context failure a
+    . (Monad (m context),
+       SerializationFailure failure)
+    => m context a
+    -> (Int -> [(Int, String)] -> failure -> m context a)
+    -> m context a
   seek
-    :: SerialOrigin -> Int -> m backend context ()
+    :: SerialOrigin -> Int -> m context ()
   tell
-    :: m backend context Int
+    :: m context Int
   primitiveTell
-    :: m backend context Int
+    :: m context Int
   isEOF
-    :: m backend context Bool
+    :: m context Bool
 
 
-class MonadSerial m backend
+class BackendSpecificMonadSerial m backend
       => MonadSerialWindow m backend where
   windowInternals
     :: SerialDataSource backend
@@ -239,24 +246,24 @@ class MonadSerial m backend
     -> Internals m backend
   
   runInUnderlying
-    :: MonadSerial m (Underlying backend)
+    :: BackendSpecificMonadSerial m (Underlying backend)
     => m (Underlying backend) context a
     -> m backend context a
 
 
-class (MonadSerial m backend)
+class (BackendSpecificMonadSerial m backend)
       => MonadSerialReader m backend
       where
   read :: Int -> m backend context ByteString
 
 
-class (MonadSerial m backend)
+class (BackendSpecificMonadSerial m backend)
       => MonadSerialWriter m backend
       where
   write :: ByteString -> m backend context ()
 
 
-class MonadSerial m ByteString
+class BackendSpecificMonadSerial m ByteString
       => MonadSerialByteString m
       where
   byteStringInternalsOffset
@@ -269,7 +276,7 @@ class MonadSerial m ByteString
     -> Internals m ByteString
 
 
-class MonadSerial m backend
+class BackendSpecificMonadSerial m backend
       => MonadSerialIO m backend
       where
   catchIO
@@ -341,12 +348,8 @@ instance Monad (PrimitiveMonad backend)
           deserializationAction (f y) internals' context tags
 
 
-instance MonadSerial BackendSpecificSerialization
-                     ByteString
-                     where
-  monadSerialConstructor = BackendSpecificSerialization
-  monadSerialActionAccessor = serializationAction
-  
+instance BackendSpecificMonadSerial BackendSpecificSerialization ByteString
+         where
   data Internals BackendSpecificSerialization ByteString =
     ByteStringSerializationInternals {
         byteStringSerializationInternalsDataSource
@@ -361,19 +364,10 @@ instance MonadSerial BackendSpecificSerialization
     BackendSpecificSerialization $ \_ _ _ ->
       return $ Right (internals, ())
   internalsDataSource = byteStringSerializationInternalsDataSource
-  
-  seek = byteStringSeek
-  tell = byteStringTell
-  primitiveTell = tell
-  isEOF = byteStringIsEOF
 
 
-instance MonadSerial BackendSpecificSerialization
-                     FilePath
-                     where
-  monadSerialConstructor = BackendSpecificSerialization
-  monadSerialActionAccessor = serializationAction
-  
+instance BackendSpecificMonadSerial BackendSpecificSerialization FilePath
+         where
   data Internals BackendSpecificSerialization FilePath = 
     FilePathSerializationInternals {
         filePathSerializationInternalsDataSource
@@ -388,29 +382,13 @@ instance MonadSerial BackendSpecificSerialization
     BackendSpecificSerialization $ \_ _ _ ->
       return $ Right (internals, ())
   internalsDataSource = filePathSerializationInternalsDataSource
-  
-  seek origin offset = do
-    internals <- getInternals
-    handleSeek (filePathSerializationInternalsHandle internals)
-               origin
-               offset
-  tell = do
-    internals <- getInternals
-    handleTell $ filePathSerializationInternalsHandle internals
-  primitiveTell = tell
-  isEOF = do
-    internals <- getInternals
-    handleIsEOF $ filePathSerializationInternalsHandle internals
 
 
-instance (MonadSerial BackendSpecificSerialization
-                      underlying)
-         => MonadSerial BackendSpecificSerialization
-                        (Window underlying)
-                        where
-  monadSerialConstructor = BackendSpecificSerialization
-  monadSerialActionAccessor = serializationAction
-  
+instance (BackendSpecificMonadSerial BackendSpecificSerialization
+                                     underlying)
+         => BackendSpecificMonadSerial BackendSpecificSerialization
+                                       (Window underlying)
+         where
   data Internals BackendSpecificSerialization (Window underlying) =
     WindowSerializationInternals {
         windowSerializationInternalsDataSource
@@ -425,19 +403,10 @@ instance (MonadSerial BackendSpecificSerialization
     BackendSpecificSerialization $ \_ _ _ ->
       return $ Right (internals, ())
   internalsDataSource = windowSerializationInternalsDataSource
-  
-  seek = windowSeek
-  tell = windowTell
-  primitiveTell = runInUnderlying primitiveTell
-  isEOF = windowIsEOF
 
 
-instance MonadSerial BackendSpecificDeserialization
-                     ByteString
-                     where
-  monadSerialConstructor = BackendSpecificDeserialization
-  monadSerialActionAccessor = deserializationAction
-  
+instance BackendSpecificMonadSerial BackendSpecificDeserialization ByteString
+         where
   data Internals BackendSpecificDeserialization ByteString = 
     ByteStringDeserializationInternals {
         byteStringDeserializationInternalsDataSource
@@ -452,19 +421,10 @@ instance MonadSerial BackendSpecificDeserialization
     BackendSpecificDeserialization $ \_ _ _ ->
       return $ Right (internals, ())
   internalsDataSource = byteStringDeserializationInternalsDataSource
-  
-  seek = byteStringSeek
-  tell = byteStringTell
-  primitiveTell = tell
-  isEOF = byteStringIsEOF
 
 
-instance MonadSerial BackendSpecificDeserialization
-                     FilePath
-                     where
-  monadSerialConstructor = BackendSpecificDeserialization
-  monadSerialActionAccessor = deserializationAction
-  
+instance BackendSpecificMonadSerial BackendSpecificDeserialization FilePath
+         where
   data Internals BackendSpecificDeserialization FilePath = 
     FilePathDeserializationInternals {
         filePathDeserializationInternalsDataSource
@@ -479,29 +439,13 @@ instance MonadSerial BackendSpecificDeserialization
     BackendSpecificDeserialization $ \_ _ _ ->
       return $ Right (internals, ())
   internalsDataSource = filePathDeserializationInternalsDataSource
-  
-  seek origin offset = do
-    internals <- getInternals
-    handleSeek (filePathDeserializationInternalsHandle internals)
-               origin
-               offset
-  tell = do
-    internals <- getInternals
-    handleTell $ filePathDeserializationInternalsHandle internals
-  primitiveTell = tell
-  isEOF = do
-    internals <- getInternals
-    handleIsEOF $ filePathDeserializationInternalsHandle internals
 
 
-instance (MonadSerial BackendSpecificDeserialization
-                      underlying)
-         => MonadSerial BackendSpecificDeserialization
-                        (Window underlying)
-                        where
-  monadSerialConstructor = BackendSpecificDeserialization
-  monadSerialActionAccessor = deserializationAction
-  
+instance (BackendSpecificMonadSerial BackendSpecificDeserialization
+                                     underlying)
+         => BackendSpecificMonadSerial BackendSpecificDeserialization
+                                       (Window underlying)
+         where
   data Internals BackendSpecificDeserialization (Window underlying) =
     WindowDeserializationInternals {
         windowDeserializationInternalsDataSource
@@ -516,14 +460,124 @@ instance (MonadSerial BackendSpecificDeserialization
     BackendSpecificDeserialization $ \_ _ _ ->
       return $ Right (internals, ())
   internalsDataSource = windowDeserializationInternalsDataSource
-  
+
+
+instance MonadSerial (BackendSpecificSerialization ByteString) where  
+  throw failure = throwImplementation BackendSpecificSerialization failure
+  catch action handler =
+    catchImplementation BackendSpecificSerialization serializationAction
+                        action handler
+  seek = byteStringSeek
+  tell = byteStringTell
+  primitiveTell = tell
+  isEOF = byteStringIsEOF
+
+
+instance MonadSerial (BackendSpecificSerialization FilePath) where
+  throw failure = throwImplementation BackendSpecificSerialization failure
+  catch action handler =
+    catchImplementation BackendSpecificSerialization serializationAction
+                        action handler
+  seek origin offset = do
+    internals <- getInternals
+    handleSeek (filePathSerializationInternalsHandle internals)
+               origin
+               offset
+  tell = do
+    internals <- getInternals
+    handleTell $ filePathSerializationInternalsHandle internals
+  primitiveTell = tell
+  isEOF = do
+    internals <- getInternals
+    handleIsEOF $ filePathSerializationInternalsHandle internals
+
+
+instance (BackendSpecificMonadSerial BackendSpecificSerialization underlying,
+          MonadSerial (BackendSpecificSerialization underlying))
+         => MonadSerial (BackendSpecificSerialization (Window underlying))
+         where
+  throw failure = throwImplementation BackendSpecificSerialization failure
+  catch action handler =
+    catchImplementation BackendSpecificSerialization serializationAction
+                        action handler
   seek = windowSeek
   tell = windowTell
   primitiveTell = runInUnderlying primitiveTell
   isEOF = windowIsEOF
 
 
-instance MonadSerial BackendSpecificSerialization underlying
+instance MonadSerial (BackendSpecificDeserialization ByteString)
+         where
+  throw failure = throwImplementation BackendSpecificDeserialization failure
+  catch action handler =
+    catchImplementation BackendSpecificDeserialization deserializationAction
+                        action handler
+  seek = byteStringSeek
+  tell = byteStringTell
+  primitiveTell = tell
+  isEOF = byteStringIsEOF
+
+
+instance MonadSerial (BackendSpecificDeserialization FilePath) where
+  throw failure = throwImplementation BackendSpecificDeserialization failure
+  catch action handler =
+    catchImplementation BackendSpecificDeserialization deserializationAction
+                        action handler
+  seek origin offset = do
+    internals <- getInternals
+    handleSeek (filePathDeserializationInternalsHandle internals)
+               origin
+               offset
+  tell = do
+    internals <- getInternals
+    handleTell $ filePathDeserializationInternalsHandle internals
+  primitiveTell = tell
+  isEOF = do
+    internals <- getInternals
+    handleIsEOF $ filePathDeserializationInternalsHandle internals
+
+
+instance (BackendSpecificMonadSerial BackendSpecificDeserialization underlying,
+          MonadSerial (BackendSpecificDeserialization underlying))
+         => MonadSerial (BackendSpecificDeserialization (Window underlying))
+         where
+  throw failure = throwImplementation BackendSpecificDeserialization failure
+  catch action handler =
+    catchImplementation BackendSpecificDeserialization deserializationAction
+                        action handler
+  seek = windowSeek
+  tell = windowTell
+  primitiveTell = runInUnderlying primitiveTell
+  isEOF = windowIsEOF
+
+
+instance MonadSerial ContextualSerialization where
+  throw failure = ContextualSerialization $ throw failure
+  catch action handler =
+    ContextualSerialization
+     $ catch (contextualSerializationAction action)
+             (\offset tags failure ->
+                contextualSerializationAction $ handler offset tags failure)
+  seek origin offset = ContextualSerialization $ seek origin offset
+  tell = ContextualSerialization tell
+  primitiveTell = ContextualSerialization primitiveTell
+  isEOF = ContextualSerialization isEOF
+
+
+instance MonadSerial ContextualDeserialization where
+  throw failure = ContextualDeserialization $ throw failure
+  catch action handler =
+    ContextualDeserialization
+     $ catch (contextualDeserializationAction action)
+             (\offset tags failure ->
+                contextualDeserializationAction $ handler offset tags failure)
+  seek origin offset = ContextualDeserialization $ seek origin offset
+  tell = ContextualDeserialization tell
+  primitiveTell = ContextualDeserialization primitiveTell
+  isEOF = ContextualDeserialization isEOF
+
+
+instance BackendSpecificMonadSerial BackendSpecificSerialization underlying
          => MonadSerialWindow BackendSpecificSerialization
                               (Window underlying) where
   windowInternals =
@@ -537,7 +591,7 @@ instance MonadSerial BackendSpecificSerialization underlying
   
 
 
-instance MonadSerial BackendSpecificDeserialization underlying
+instance BackendSpecificMonadSerial BackendSpecificDeserialization underlying
          => MonadSerialWindow BackendSpecificDeserialization
                               (Window underlying) where
   windowInternals =
@@ -588,8 +642,8 @@ instance MonadSerialReader BackendSpecificDeserialization
                nBytes
 
 
-instance (MonadSerialReader BackendSpecificDeserialization
-                            underlying)
+instance (MonadSerial (BackendSpecificDeserialization underlying),
+          MonadSerialReader BackendSpecificDeserialization underlying)
           => MonadSerialReader BackendSpecificDeserialization
                                (Window underlying)
                                where
@@ -619,26 +673,26 @@ instance MonadSerialIO BackendSpecificSerialization
                        FilePath
                        where
   catchIO action handler =
-    monadSerialConstructor $ \internals context tags -> do
+    BackendSpecificSerialization $ \internals context tags -> do
       E.catch (do
                  result <- action
                  return $ Right (internals, result))
               (\exception ->
-                 monadSerialActionAccessor (handler exception)
-                                           internals context tags)
+                 serializationAction (handler exception)
+                                     internals context tags)
 
 
 instance MonadSerialIO BackendSpecificDeserialization
                        FilePath
                        where
   catchIO action handler =
-    monadSerialConstructor $ \internals context tags -> do
+    BackendSpecificDeserialization $ \internals context tags -> do
       E.catch (do
                  result <- action
                  return $ Right (internals, result))
               (\exception ->
-                 monadSerialActionAccessor (handler exception)
-                                           internals context tags)
+                 deserializationAction (handler exception)
+                                       internals context tags)
 
 
 instance SerializationFailure SomeSerializationFailure where
@@ -674,37 +728,22 @@ instance Show InsufficientDataSerializationFailure where
     "Insufficient data for read of " ++ show readLength ++ " bytes"
 
 
-throw
-  :: forall m backend context failure a
-  .  (Monad (m backend context),
-      MonadSerial m backend,
-      SerializationFailure failure)
-  => failure
-  -> m backend context a
-throw failure = do
+throwImplementation constructor failure = do
   offset <- primitiveTell
-  monadSerialConstructor $ \_ _ tags ->
+  constructor $ \_ _ tags ->
     return $ Left (offset, tags, toSerializationFailure failure)
 
 
-catch
-  :: forall m backend context failure a
-  . (Monad (m backend context),
-     MonadSerial m backend,
-     SerializationFailure failure)
-  => m backend context a
-  -> (Int -> [(Int, String)] -> failure -> m backend context a)
-  -> m backend context a
-catch action handler = do
+catchImplementation constructor accessor action handler = do
   initialOffset <- tell
-  monadSerialConstructor $ \internals context tags -> do
-    result <- monadSerialActionAccessor action internals context tags
+  constructor $ \internals context tags -> do
+    result <- accessor action internals context tags
     case result of
       Left (failureOffset, failureTags, failure) ->
         case fromSerializationFailure failure of
           Nothing -> return result
           Just specificFailure ->
-            monadSerialActionAccessor
+            accessor
              (do
                seek OffsetFromStart initialOffset
                handler failureOffset failureTags specificFailure)
@@ -712,17 +751,20 @@ catch action handler = do
       Right _ -> return result
 
 
+-- IAK
 getContext
   :: (Monad (m backend context),
-      MonadSerial m backend)
+      BackendSpecificMonadSerial m backend)
   => m backend context context
+getContext = undefined -- TODO
+{-
 getContext =
   monadSerialConstructor $ \internals context tags ->
     return $ Right (internals, context)
 
 
 withContext
-  :: MonadSerial m backend
+  :: BackendSpecificMonadSerial m backend
   => context'
   -> m backend context' a
   -> m backend context a
@@ -736,7 +778,7 @@ withContext context x =
 
 getTags
   :: (Monad (m backend context),
-      MonadSerial m backend)
+      BackendSpecificMonadSerial m backend)
   => m backend context [(Int, String)]
 getTags =
   monadSerialConstructor $ \internals context tags ->
@@ -745,7 +787,8 @@ getTags =
 
 withTag
   :: (Monad (m backend context),
-      MonadSerial m backend)
+      BackendSpecificMonadSerial m backend,
+      MonadSerial (m backend))
   => String
   -> m backend context a
   -> m backend context a
@@ -759,8 +802,9 @@ withTag tagText action = do
 
 withWindow
   :: (Monad (m backend context),
-      MonadSerial m backend,
-      MonadSerial m (Window backend),
+      BackendSpecificMonadSerial m backend,
+      MonadSerial (m backend),
+      MonadSerial (m (Window backend)),
       MonadSerialWindow m (Window backend))
   => SerialOrigin
   -> Int
@@ -800,10 +844,12 @@ withWindow origin offset length action = do
         let modifiedInternals =
               windowInternalsUnderlying modifiedWindowedInternals
         return $ Right (modifiedInternals, a)
+-}
 
 
 byteStringSeek
   :: (Monad (m ByteString context),
+      MonadSerial (m ByteString),
       MonadSerialByteString m)
   => SerialOrigin
   -> Int
@@ -839,6 +885,7 @@ byteStringTell = do
 
 byteStringIsEOF
   :: (Monad (m ByteString context),
+      MonadSerial (m ByteString),
       MonadSerialByteString m)
   => m ByteString context Bool
 byteStringIsEOF = do
@@ -883,6 +930,7 @@ byteStringRead nBytes = do
 
 handleSeek
   :: (Monad (m FilePath context),
+      MonadSerial (m FilePath),
       MonadSerialIO m FilePath)
   => Handle
   -> SerialOrigin
@@ -913,6 +961,7 @@ handleSeek handle origin desiredOffset = do
 
 handleTell
   :: (Monad (m FilePath context),
+      MonadSerial (m FilePath),
       MonadSerialIO m FilePath)
   => Handle
   -> m FilePath context Int
@@ -925,6 +974,7 @@ handleTell handle = do
 
 handleIsEOF
   :: (Monad (m FilePath context),
+      MonadSerial (m FilePath),
       MonadSerialIO m FilePath)
   => Handle
   -> m FilePath context Bool
@@ -935,6 +985,7 @@ handleIsEOF handle = do
 
 handleWrite
   :: (Monad (m FilePath context),
+      MonadSerial (m FilePath),
       MonadSerialIO m FilePath,
       MonadSerialWriter m FilePath)
   => Handle
@@ -947,6 +998,7 @@ handleWrite handle output = do
 
 handleRead
   :: (Monad (m FilePath context),
+      MonadSerial (m FilePath),
       MonadSerialIO m FilePath,
       MonadSerialReader m FilePath)
   => Handle
@@ -958,11 +1010,13 @@ handleRead handle nBytes = do
 
 
 windowRunInUnderlying
-  :: (MonadSerial m (Window underlying),
-      MonadSerial m underlying,
+  :: (BackendSpecificMonadSerial m (Window underlying),
+      BackendSpecificMonadSerial m underlying,
       MonadSerialWindow m (Window underlying))
   => m underlying context a
   -> m (Window underlying) context a
+windowRunInUnderlying x = undefined -- TODO
+{-
 windowRunInUnderlying x =
   monadSerialConstructor $ \internals context tags -> do
     let underlyingInternals =
@@ -974,12 +1028,14 @@ windowRunInUnderlying x =
         let internals' =
               updateWindowInternalsUnderlying internals underlyingInternals'
         return $ Right (internals', y)
+-}
 
 
 windowSeek
   :: (Monad (m (Window underlying) context),
-      MonadSerial m (Window underlying),
-      MonadSerial m underlying,
+      BackendSpecificMonadSerial m underlying,
+      MonadSerial (m (Window underlying)),
+      MonadSerial (m underlying),
       MonadSerialWindow m (Window underlying))
   => SerialOrigin
   -> Int
@@ -1005,8 +1061,9 @@ windowSeek origin desiredOffset = do
 
 windowTell
   :: (Monad (m (Window underlying) context),
-      MonadSerial m (Window underlying),
-      MonadSerial m underlying,
+      BackendSpecificMonadSerial m underlying,
+      MonadSerial (m (Window underlying)),
+      MonadSerial (m underlying),
       MonadSerialWindow m (Window underlying))
   => m (Window underlying) context Int
 windowTell = do
@@ -1027,8 +1084,8 @@ windowTell = do
 
 windowIsEOF
   :: (Monad (m (Window underlying) context),
-      MonadSerial m (Window underlying),
-      MonadSerial m underlying,
+      MonadSerial (m (Window underlying)),
+      MonadSerial (m underlying),
       MonadSerialWindow m (Window underlying))
   => m (Window underlying) context Bool
 windowIsEOF = do
@@ -1049,7 +1106,7 @@ windowWrite output = error "writeWindow not implemented"
 
 windowRead
   :: (Monad (m (Window underlying) context),
-      MonadSerialReader m (Window underlying),
+      MonadSerial (m (Window underlying)),
       MonadSerialReader m underlying,
       MonadSerialWindow m (Window underlying))
   => Int
