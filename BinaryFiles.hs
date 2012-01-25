@@ -29,7 +29,7 @@ module BinaryFiles
    withContext,
    getTags,
    withTag,
-   -- withWindow, IAK
+   withWindow,
    runSerializationToByteString,
    runSerializationToFile,
    runDeserializationFromByteString,
@@ -242,16 +242,6 @@ class MonadSerial m where
     => String
     -> m context a
     -> m context a
-  {-
-  withWindow
-    :: (Monad (m context),
-        MonadSerial (WindowedMonadSerial m))
-    => SerialOrigin
-    -> Int
-    -> Int
-    -> WindowedMonadSerial m context a
-    -> m context a
-    -}
   seek
     :: SerialOrigin -> Int -> m context ()
   tell
@@ -268,6 +258,16 @@ class MonadSerial m => MonadSerialReader m where
 
 class MonadSerial m => MonadSerialWriter m where
   write :: ByteString -> m context ()
+
+
+class MonadSerial m => BackendInspecificMonadSerial m where
+  withWindow
+    :: (Monad (m context))
+    => SerialOrigin
+    -> Int
+    -> Int
+    -> m context a
+    -> m context a
 
 
 class BackendSpecificMonadSerial m backend
@@ -391,6 +391,14 @@ instance forall context
     ContextualDeserialization $ do
       v <- contextualDeserializationAction x
       contextualDeserializationAction $ f v
+
+
+instance BackendInspecificMonadSerial ContextualSerialization where
+  withWindow = withWindowImplementation
+
+
+instance BackendInspecificMonadSerial ContextualDeserialization where
+  withWindow = withWindowImplementation
 
 
 instance BackendSpecificMonadSerial BackendSpecificSerialization ByteString
@@ -556,7 +564,8 @@ instance MonadSerial (BackendSpecificSerialization FilePath) where
 
 
 instance (BackendSpecificMonadSerial BackendSpecificSerialization underlying,
-          MonadSerial (BackendSpecificSerialization underlying))
+          MonadSerial (BackendSpecificSerialization underlying),
+          MonadSerialWriter (BackendSpecificSerialization underlying))
          => MonadSerial (BackendSpecificSerialization (Window underlying))
          where
   throw failure = throwImplementation BackendSpecificSerialization failure
@@ -628,7 +637,8 @@ instance MonadSerial (BackendSpecificDeserialization FilePath) where
 
 
 instance (BackendSpecificMonadSerial BackendSpecificDeserialization underlying,
-          MonadSerial (BackendSpecificDeserialization underlying))
+          MonadSerial (BackendSpecificDeserialization underlying),
+          MonadSerialReader (BackendSpecificDeserialization underlying))
          => MonadSerial (BackendSpecificDeserialization (Window underlying))
          where
   throw failure = throwImplementation BackendSpecificDeserialization failure
@@ -989,7 +999,7 @@ withTagImplementation constructor accessor tagText action = do
 
 
 -- IAK
-withWindowImplementation constructor accessor origin offset length action = do
+withWindowImplementation origin offset length action = do
   absoluteOffset <- case origin of
                       OffsetFromStart -> do
                         return offset
