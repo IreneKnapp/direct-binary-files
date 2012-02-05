@@ -17,6 +17,7 @@ module BinaryFiles
    LowLevelSerializationFailure(..),
    OutOfRangeSerializationFailure(..),
    InsufficientDataSerializationFailure(..),
+   MonadSerial,
    seek,
    tell,
    isEOF,
