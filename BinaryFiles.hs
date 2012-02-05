@@ -1188,12 +1188,27 @@ isEOFImplementation backendIsEOF = do
 
 
 writeImplementation
-  :: (MonadSerialWriter m)
+  :: (Monad (m context),
+      MonadSerialWriter m)
   => (ByteString -> m context ())
   -> ByteString
   -> m context ()
 writeImplementation backendWrite output = do
-  undefined
+  let outputLength = BS.length output
+  recurseOnWindows
+    (\_ -> backendWrite output)
+    (\maybeOffset windowStart windowLength recurse -> do
+      offset <- case maybeOffset of
+                  Nothing -> tell
+                  Just offset -> return offset
+      let outputStart = offset
+          outputEnd = outputStart + outputLength
+      if (outputStart >= 0) && (outputEnd < windowLength)
+        then recurse $ Just $ offset + windowStart
+        else throw $ OutOfRangeSerializationFailure $ if outputStart < 0
+               then outputStart
+               else outputEnd)
+    Nothing
 
 
 readImplementation
@@ -1205,12 +1220,12 @@ readImplementation
 readImplementation backendRead nBytes = do
   recurseOnWindows
     (\_ -> backendRead nBytes)
-    (\maybeOffset _ windowLength recurse -> do
+    (\maybeOffset windowStart windowLength recurse -> do
       offset <- case maybeOffset of
                   Nothing -> tell
                   Just offset -> return offset
       if offset + nBytes <= windowLength
-        then recurse $ Just offset
+        then recurse $ Just $ offset + windowStart
         else throw $ InsufficientDataSerializationFailure nBytes)
     Nothing
 
@@ -1248,7 +1263,25 @@ runSerializationToFile
   -> FilePath
   -> IO (Either (Int, [(Int, String)], SomeSerializationFailure) a)
 runSerializationToFile action filePath = do
-  undefined
+  withBinaryFile filePath WriteMode $ \handle -> do
+    let dataSource =
+          FilePathSerialDataSource {
+              filePathSerialDataSourceFilePath = filePath
+            }
+        internals =
+          FilePathSerializationInternals {
+              filePathSerializationInternalsDataSource = dataSource,
+              filePathSerializationInternalsHandle = handle
+            }
+        context = ()
+        tags = []
+        window = IdentityWindow
+    result <- serializationAction
+               (contextualSerializationAction action)
+               internals context tags window
+    case result of
+      Left failure -> return $ Left failure
+      Right (_, result) -> return $ Right result
 
 
 runDeserializationFromByteString
