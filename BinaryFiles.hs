@@ -291,6 +291,20 @@ class BackendSpecificMonadSerial m ByteString
     -> Internals m ByteString
 
 
+class (MonadSerialWriter (m backend),
+       BackendSpecificMonadSerial m backend)
+      => MonadSerialByteStringWriter m backend
+      where
+  byteStringWriterInternalsOutputs
+    :: Internals m backend
+    -> [(Int, ByteString)]
+  
+  updateByteStringWriterInternalsOutputs
+    :: [(Int, ByteString)]
+    -> Internals m backend
+    -> Internals m backend
+
+
 class BackendSpecificMonadSerial m backend
       => MonadSerialIO m backend
       where
@@ -379,7 +393,9 @@ instance BackendSpecificMonadSerial BackendSpecificSerialization ByteString
         byteStringSerializationInternalsDataSource
           :: SerialDataSource ByteString,
         byteStringSerializationInternalsOffset
-          :: Int
+          :: Int,
+        byteStringSerializationInternalsOutputs
+          :: [(Int, ByteString)]
       }
   getInternals =
     BackendSpecificSerialization $ \internals _ _ _ ->
@@ -649,6 +665,17 @@ instance MonadSerialByteString BackendSpecificDeserialization where
   updateByteStringInternalsOffset newOffset internals =
       internals {
           byteStringDeserializationInternalsOffset = newOffset
+        }
+
+
+instance MonadSerialByteStringWriter
+           BackendSpecificSerialization ByteString
+         where
+  byteStringWriterInternalsOutputs = byteStringSerializationInternalsOutputs
+  
+  updateByteStringWriterInternalsOutputs newOutputs internals =
+      internals {
+          byteStringSerializationInternalsOutputs = newOutputs
         }
 
 
@@ -984,13 +1011,19 @@ byteStringIsEOF = do
 
 
 byteStringWrite
-  :: (Monad (m ByteString context),
-      MonadSerialByteString m,
-      MonadSerialWriter (m ByteString))
+  :: (MonadSerialByteString BackendSpecificSerialization,
+      MonadSerialByteStringWriter BackendSpecificSerialization ByteString)
   => ByteString
-  -> m ByteString context ()
+  -> BackendSpecificSerialization ByteString context ()
 byteStringWrite output = do
-  undefined
+  oldInternals <- getInternals
+  let preexistingOutputs = byteStringWriterInternalsOutputs oldInternals
+      oldOffset = byteStringInternalsOffset oldInternals
+      newOffset = oldOffset + BS.length output
+      newOutputs = (oldOffset, output) : preexistingOutputs
+      newInternals = updateByteStringWriterInternalsOutputs newOutputs
+                      $ updateByteStringInternalsOffset newOffset oldInternals
+  putInternals newInternals
 
 
 byteStringRead
@@ -1256,7 +1289,44 @@ runSerializationToByteString
   :: ContextualSerialization () a
   -> Either (Int, [(Int, String)], SomeSerializationFailure) (a, ByteString)
 runSerializationToByteString action = do
-  undefined
+  identityAction $ do
+    let dataSource =
+          ByteStringSerialDataSource {
+              byteStringSerialDataSourceByteString = BS.empty
+            }
+        internals =
+          ByteStringSerializationInternals {
+              byteStringSerializationInternalsDataSource = dataSource,
+              byteStringSerializationInternalsOffset = 0,
+              byteStringSerializationInternalsOutputs = []
+            }
+        context = ()
+        tags = []
+        window = IdentityWindow
+    result <- serializationAction
+               (do
+                  value <- contextualSerializationAction action
+                  internals <- getInternals
+                  let outputs =
+                        byteStringSerializationInternalsOutputs internals
+                      finalLength =
+                        foldl' (\lengthSoFar (offset, output) ->
+                                  max lengthSoFar (offset + BS.length output))
+                               0
+                               outputs
+                      output =
+                        foldl' (\outputSoFar (offset, output) ->
+                                 BS.concat [BS.take offset outputSoFar,
+                                            output,
+                                            BS.drop (offset + BS.length output)
+                                                    outputSoFar])
+                               (BS.replicate finalLength 0x00)
+                               (reverse outputs)
+                  return (value, output))
+               internals context tags window
+    case result of
+      Left failure -> return $ Left failure
+      Right (_, result) -> return $ Right result
 
 
 runSerializationToFile
