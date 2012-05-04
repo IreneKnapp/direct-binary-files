@@ -1045,7 +1045,10 @@ byteStringRead nBytes = do
                       internals
       result = BS.take actualLengthRead $ BS.drop currentOffset byteString
   putInternals newInternals
-  return result
+  if actualLengthRead < nBytes
+    then throw $ InsufficientDataSerializationFailure
+                   $ nBytes - actualLengthRead
+    else return result
 
 
 handleSeek
